@@ -1,0 +1,6 @@
+manifestVersion: 1
+name: "@keeb/ssh"
+version: "2026.02.27.1"
+description: "General-purpose SSH operations — exec, upload, wait for connection"
+models:
+  - ssh_host.ts
