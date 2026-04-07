@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@keeb/ssh"
-version: "2026.03.02.3"
+version: "2026.04.06.1"
 description: "General-purpose SSH operations — exec, upload, wait for connection (https://github.com/keeb/swamp-ssh)"
 repository: https://github.com/keeb/swamp-ssh
 labels:
@@ -9,3 +9,5 @@ labels:
   - remote-access
 models:
   - ssh_host.ts
+skills:
+  - ssh
