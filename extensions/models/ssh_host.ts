@@ -1,10 +1,50 @@
+/**
+ * @keeb/ssh/host model — general-purpose SSH operations.
+ *
+ * Exposes `exec`, `upload`, and `waitForConnection` methods for running
+ * shell commands, copying files, and polling reachability over SSH.
+ *
+ * Transport is selected by the `via` global argument:
+ *   - "key"           plain ssh/scp (default)
+ *   - "tailscale"     `tailscale ssh` using tailnet identity
+ *   - "bastion"       ssh/scp via -J <bastion>
+ *   - "proxy-command" ssh/scp via -o ProxyCommand=<cmd>
+ */
 import { z } from "npm:zod@4";
-import { sshExec, waitForSsh } from "./lib/ssh.ts";
+import {
+  type SshConnection,
+  sshExec,
+  sshUpload,
+  waitForSsh,
+} from "./lib/ssh.ts";
 
-// Global arguments — SSH connection params shared by every method
+// Swamp wires args/context at runtime; the model loader doesn't expose types.
+// deno-lint-ignore no-explicit-any
+type ExecuteArgs = any;
+interface ExecuteContext {
+  // deno-lint-ignore no-explicit-any
+  globalArgs: any;
+  writeResource(
+    resource: string,
+    name: string,
+    // deno-lint-ignore no-explicit-any
+    body: any,
+    // deno-lint-ignore no-explicit-any
+  ): Promise<any>;
+}
+
+/** Global SSH connection arguments shared by every method. */
 const SshConnectionArgs = z.object({
   host: z.string().describe("SSH hostname or IP"),
   user: z.string().default("root").describe("SSH user"),
+  via: z.enum(["key", "tailscale", "bastion", "proxy-command"]).default("key")
+    .describe("Transport style for the SSH connection"),
+  bastion: z.string().optional().describe(
+    "user@host of the jump host (required when via=bastion)",
+  ),
+  proxyCommand: z.string().optional().describe(
+    "Command piped into ssh via -o ProxyCommand (required when via=proxy-command)",
+  ),
 });
 
 // Per-method argument schemas
@@ -28,6 +68,7 @@ const ResultSchema = z.object({
   exitCode: z.number().optional(),
   command: z.string().optional(),
   host: z.string().optional(),
+  via: z.string().optional(),
   source: z.string().optional(),
   dest: z.string().optional(),
   connected: z.boolean().optional(),
@@ -36,9 +77,26 @@ const ResultSchema = z.object({
   timestamp: z.string(),
 });
 
-export const model = {
-  type: "@user/ssh/host",
-  version: "2026.02.18.1",
+function connectionFrom(globalArgs: ExecuteContext["globalArgs"]): SshConnection {
+  return {
+    host: globalArgs.host,
+    user: globalArgs.user ?? "root",
+    via: globalArgs.via ?? "key",
+    bastion: globalArgs.bastion,
+    proxyCommand: globalArgs.proxyCommand,
+  };
+}
+
+/** Swamp model definition for `@keeb/ssh/host`. */
+export const model: {
+  type: string;
+  version: string;
+  resources: Record<string, unknown>;
+  globalArguments: typeof SshConnectionArgs;
+  methods: Record<string, unknown>;
+} = {
+  type: "@keeb/ssh/host",
+  version: "2026.05.14.1",
   resources: {
     "result": {
       description: "SSH operation result",
@@ -52,22 +110,29 @@ export const model = {
     exec: {
       description: "Run a command over SSH and return stdout/stderr/exitCode",
       arguments: ExecArgs,
-      execute: async (args, context) => {
+      execute: async (args: ExecuteArgs, context: ExecuteContext) => {
         const { command } = args;
-        const { host, user = "root" } = context.globalArgs;
-        const logs = [];
-        const log = (msg) => logs.push(msg);
+        const connection = connectionFrom(context.globalArgs);
+        const logs: string[] = [];
+        const log = (msg: string) => logs.push(msg);
 
-        log(`Running command on ${user}@${host}: ${command.length > 120 ? command.slice(0, 120) + '...' : command}`);
-        const result = await sshExec(host, user, command);
-        log(`Command completed (stdout: ${result.stdout.length} bytes, stderr: ${result.stderr.length} bytes)`);
+        log(
+          `Running command on ${connection.user}@${connection.host} via ${connection.via}: ${
+            command.length > 120 ? command.slice(0, 120) + "..." : command
+          }`,
+        );
+        const result = await sshExec(connection, command);
+        log(
+          `Command completed (stdout: ${result.stdout.length} bytes, stderr: ${result.stderr.length} bytes)`,
+        );
 
         const handle = await context.writeResource("result", "result", {
           stdout: result.stdout,
           stderr: result.stderr,
           exitCode: result.code,
           command,
-          host,
+          host: connection.host,
+          via: connection.via,
           logs: logs.join("\n"),
           timestamp: new Date().toISOString(),
         });
@@ -76,37 +141,26 @@ export const model = {
     },
 
     upload: {
-      description: "Upload files to a remote host via rsync",
+      description:
+        "Upload a file to a remote host via scp (or piped cat on tailscale)",
       arguments: UploadArgs,
-      execute: async (args, context) => {
+      execute: async (args: ExecuteArgs, context: ExecuteContext) => {
         const { source, dest } = args;
-        const { host, user = "root" } = context.globalArgs;
-        const logs = [];
-        const log = (msg) => logs.push(msg);
+        const connection = connectionFrom(context.globalArgs);
+        const logs: string[] = [];
+        const log = (msg: string) => logs.push(msg);
 
-        log(`Uploading ${source} to ${user}@${host}:${dest}`);
-
-        // @ts-ignore - Deno API
-        const scp = new Deno.Command("scp", {
-          args: [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=10",
-            source,
-            `${user}@${host}:${dest}`,
-          ],
-        });
-        const result = await scp.output();
-        if (result.code !== 0) {
-          const err = new TextDecoder().decode(result.stderr);
-          throw new Error(`scp failed: ${err}`);
-        }
+        log(
+          `Uploading ${source} to ${connection.user}@${connection.host}:${dest} via ${connection.via}`,
+        );
+        await sshUpload(connection, source, dest);
         log(`Upload complete`);
 
         const handle = await context.writeResource("result", "result", {
           source,
           dest,
-          host,
+          host: connection.host,
+          via: connection.via,
           success: true,
           logs: logs.join("\n"),
           timestamp: new Date().toISOString(),
@@ -118,24 +172,29 @@ export const model = {
     waitForConnection: {
       description: "Poll SSH until the host is reachable",
       arguments: WaitForConnectionArgs,
-      execute: async (args, context) => {
+      execute: async (args: ExecuteArgs, context: ExecuteContext) => {
         const { timeout = 60 } = args;
-        const { host, user = "root" } = context.globalArgs;
-        const logs = [];
-        const log = (msg) => logs.push(msg);
+        const connection = connectionFrom(context.globalArgs);
+        const logs: string[] = [];
+        const log = (msg: string) => logs.push(msg);
 
-        log(`Waiting for SSH on ${user}@${host} (up to ${timeout}s)`);
-        const connected = await waitForSsh(host, user, timeout);
+        log(
+          `Waiting for SSH on ${connection.user}@${connection.host} via ${connection.via} (up to ${timeout}s)`,
+        );
+        const connected = await waitForSsh(connection, timeout);
 
         if (!connected) {
-          throw new Error(`SSH not reachable on ${host} after ${timeout}s`);
+          throw new Error(
+            `SSH not reachable on ${connection.host} after ${timeout}s`,
+          );
         }
 
         log(`SSH connection established`);
 
         const handle = await context.writeResource("result", "result", {
           connected: true,
-          host,
+          host: connection.host,
+          via: connection.via,
           logs: logs.join("\n"),
           timestamp: new Date().toISOString(),
         });

@@ -14,6 +14,22 @@ Remote command execution, file upload, and connection waiting over SSH.
 | `upload` | SCP a file to the remote host |
 | `waitForConnection` | Wait until SSH is reachable (with timeout) |
 
+#### Transports
+
+Set `via` on the model to pick how the connection is established:
+
+| `via` | Notes |
+|-------|-------|
+| `key` (default) | Plain `ssh`/`scp` using the local agent + `~/.ssh` keys |
+| `tailscale` | `tailscale ssh` — uses tailnet identity; no static keys needed |
+| `bastion` | Routes through `-J <bastion>` (e.g. `user@jump-host`) |
+| `proxy-command` | Tunnels via an arbitrary `ProxyCommand` (e.g. AWS SSM) |
+
+Extra globalArguments per transport:
+
+- `via: bastion` → `bastion: "user@jump-host"`
+- `via: proxy-command` → `proxyCommand: "aws ssm start-session --target i-..."`
+
 ## Workflows
 
 None — this is a foundational model used by other extensions.
@@ -38,6 +54,72 @@ None.
 
 ```bash
 swamp extension pull @keeb/ssh
+```
+
+## Example
+
+Wait for a freshly booted VM, run a remote command, then upload a file:
+
+```yaml
+models:
+  - name: host
+    type: "@keeb/ssh/host"
+    globalArguments:
+      host: "10.0.0.42"
+      user: "root"
+
+jobs:
+  - name: provision
+    steps:
+      - model: host
+        method: waitForConnection
+        inputs: { timeout: 120 }
+      - model: host
+        method: exec
+        inputs: { command: "apk add curl bash" }
+      - model: host
+        method: upload
+        inputs:
+          source: "./config.yaml"
+          dest: "/etc/app/config.yaml"
+```
+
+### Via a bastion / jump host
+
+```yaml
+models:
+  - name: host
+    type: "@keeb/ssh/host"
+    globalArguments:
+      host: "10.0.0.42"
+      user: "root"
+      via: bastion
+      bastion: "ops@jump.example.com"
+```
+
+### Over Tailscale
+
+```yaml
+models:
+  - name: host
+    type: "@keeb/ssh/host"
+    globalArguments:
+      host: "node-01"
+      user: "root"
+      via: tailscale
+```
+
+### Through AWS SSM (proxy-command)
+
+```yaml
+models:
+  - name: host
+    type: "@keeb/ssh/host"
+    globalArguments:
+      host: "i-0123456789abcdef0"
+      user: "ec2-user"
+      via: proxy-command
+      proxyCommand: "aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p"
 ```
 
 ## License

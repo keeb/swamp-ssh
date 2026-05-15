@@ -16,15 +16,25 @@ Single model. All methods share the same connection arguments via
 
 ### Global arguments
 
-| Field  | Type   | Default  | Notes              |
-| ------ | ------ | -------- | ------------------ |
-| `host` | string | required | Hostname or IP     |
-| `user` | string | `root`   | SSH user to log in |
+| Field          | Type   | Default  | Notes                                                                   |
+| -------------- | ------ | -------- | ----------------------------------------------------------------------- |
+| `host`         | string | required | Hostname or IP                                                          |
+| `user`         | string | `root`   | SSH user to log in                                                      |
+| `via`          | enum   | `key`    | Transport: `key` \| `tailscale` \| `bastion` \| `proxy-command`         |
+| `bastion`      | string | —        | `user@jump-host` — required when `via: bastion`                         |
+| `proxyCommand` | string | —        | Command string for `-o ProxyCommand=…` — required when `via: proxy-command` |
 
-Authentication relies on the local SSH agent / key files. The model invokes the
-system `ssh` and `scp` binaries with `StrictHostKeyChecking=no` and
-`UserKnownHostsFile=/dev/null`, so host keys are not verified — fine for
-ephemeral infra, not for anything where MITM matters.
+Default (`via: key`) authentication relies on the local SSH agent / key files.
+The model invokes the system `ssh` and `scp` binaries with
+`StrictHostKeyChecking=no` and `UserKnownHostsFile=/dev/null`, so host keys are
+not verified — fine for ephemeral infra, not for anything where MITM matters.
+
+#### Transports
+
+- **`key`** — plain `ssh`/`scp`, ambient agent + `~/.ssh` keys. Current/default behavior.
+- **`tailscale`** — `tailscale ssh user@host`. Tailnet identity replaces static keys; strict-host-key flags are dropped (Tailscale handles peer auth). Requires `tailscaled` running on the machine executing the model. Upload streams the file via `tailscale ssh "cat > dest"` — fine for configs, not optimized for huge binaries.
+- **`bastion`** — adds `-J user@bastion` to ssh and scp. Single hop only; chain multiple with comma-separated `-J` if you need it (pass the whole list in `bastion`).
+- **`proxy-command`** — adds `-o ProxyCommand=<string>`. Use for AWS SSM Session Manager, GCP IAP, Cloudflare tunnels, etc. `%h` and `%p` are expanded by ssh.
 
 ### Methods
 
@@ -133,12 +143,62 @@ jobs:
     raw: "${{ steps.install.result.stdout }}"
 ```
 
+## Transport examples
+
+### Through a jump host
+
+```yaml
+- model: "@keeb/ssh/host"
+  method: exec
+  globalArguments:
+    host: "10.0.5.7"
+    user: "root"
+    via: bastion
+    bastion: "ops@jump.example.com"
+  arguments:
+    command: "uptime"
+```
+
+### Over Tailscale
+
+```yaml
+- model: "@keeb/ssh/host"
+  method: exec
+  globalArguments:
+    host: "node-01"          # tailnet name or IP
+    user: "root"
+    via: tailscale
+  arguments:
+    command: "uname -a"
+```
+
+### AWS SSM Session Manager
+
+```yaml
+- model: "@keeb/ssh/host"
+  method: exec
+  globalArguments:
+    host: "i-0123456789abcdef0"
+    user: "ec2-user"
+    via: proxy-command
+    proxyCommand: "aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p"
+  arguments:
+    command: "id"
+```
+
 ## Gotchas
 
-- **Host key checking is disabled.** Do not use against hosts where strict
-  identity matters.
+- **Host key checking is disabled** for `via: key`, `bastion`, and
+  `proxy-command`. Do not use against hosts where strict identity matters.
+  Tailscale relies on its own peer auth instead.
 - **No password auth.** Only key-based SSH (whatever the local agent / `~/.ssh`
-  provides) works. There is no `password`/`privateKey` argument.
+  provides) works for non-tailscale transports. There is no
+  `password`/`privateKey` argument.
+- **`tailscale` upload streams via cat**, not scp — no resume, no progress, and
+  it overwrites without warning. Switch to a different transport for big files.
+- **`bastion`/`proxy-command` require their companion field.** Setting
+  `via: bastion` without `bastion`, or `via: proxy-command` without
+  `proxyCommand`, raises before the connection attempt.
 - **`exec` throws on non-zero exit.** If you need to inspect a failing command's
   output, capture it remotely (`cmd; echo $?`) or wrap in `|| true`.
 - **`upload` is scp, not rsync.** No partial transfers, no delta sync, no
