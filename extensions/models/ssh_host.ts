@@ -77,7 +77,9 @@ const ResultSchema = z.object({
   timestamp: z.string(),
 });
 
-function connectionFrom(globalArgs: ExecuteContext["globalArgs"]): SshConnection {
+function connectionFrom(
+  globalArgs: ExecuteContext["globalArgs"],
+): SshConnection {
   return {
     host: globalArgs.host,
     user: globalArgs.user ?? "root",
